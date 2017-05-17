@@ -131,27 +131,20 @@ namespace FileProcessingService
 				}
 
                 var queue = QueueClient.Create(imageQueue);
-                var message = queue.Receive();
+                var message = queue.Receive(TimeSpan.FromSeconds(3));
                 if (message != null)
                 {
-                    var pdfSerializable = message.GetBody<string>();
+                    var pdfSerializable = message.GetBody<byte[]>();
                     if (pdfSerializable != null)
                     {
-                        PdfDocument queuedDocument;
-                        byte[] b = Convert.FromBase64String(pdfSerializable);
-                        using (var stream = new MemoryStream(b))
-                        {
-                            var formatter = new BinaryFormatter();
-                            stream.Seek(0, SeekOrigin.Begin);
-                            queuedDocument = (PdfDocument)formatter.Deserialize(stream);
-                        }
-
-                        if (queuedDocument != null)
-                        {
-                            queuedDocument.Save(Path.Combine(outDirectory, $"queued_{DateTime.Now.Millisecond}.pdf"));
-                        }
+                        byte[] bytes = pdfSerializable;
+                        File.WriteAllBytes(Path.Combine(outDirectory, $"queued_{DateTime.Now.Millisecond}.pdf"), bytes);
                     }
+
+                    message.Complete();
                 }
+
+                queue.Close();
 
                 if (token.IsCancellationRequested)
 				{
@@ -210,15 +203,12 @@ namespace FileProcessingService
 
             pdfRenderer.Document = document;
             pdfRenderer.RenderDocument();
-            //pdfRenderer.Save(resultFile);
 
             var queue = QueueClient.Create(imageQueue);
             MemoryStream memorystream = new MemoryStream();
-            BinaryFormatter bf = new BinaryFormatter();
-            memorystream.Flush();
-            memorystream.Position = 0;
+            pdfRenderer.Save(memorystream, true);
 
-            queue.Send(new BrokeredMessage(Convert.ToBase64String(memorystream.ToArray())));
+            queue.Send(new BrokeredMessage(memorystream.ToArray()));
             queue.Close();
         }
 
