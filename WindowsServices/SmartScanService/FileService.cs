@@ -3,6 +3,7 @@ using Microsoft.ServiceBus.Messaging;
 using MigraDoc.DocumentObjectModel;
 using MigraDoc.Rendering;
 using PdfSharp.Pdf;
+using SmartScanService;
 using System;
 using System.IO;
 using System.Linq;
@@ -17,8 +18,10 @@ namespace FileProcessingService
 {
 	public class FileService
 	{
-        private const string imageQueue = "pdfQueue";
-        private const int timeOutBeetwenProccess = 5000;
+        private const string imageQueue = "pdfqueue";
+        private const string settingQueue = "settingsqueue";
+        
+        private int timeOutBeetwenProccess = 5000;
         private string[] availableFormatsToProccess = new[] { @"^image_[0-9].(jpg|jpeg)$", @"^screen_[0-9].(png)$" };
 
         private string inDirectory;
@@ -34,6 +37,20 @@ namespace FileProcessingService
 		private Section section;
 		private PdfDocumentRenderer pdfRenderer;
         private NamespaceManager nsManager;
+
+        private int TimeoutWatcher
+        {
+            get
+            {
+                return timeOutBeetwenProccess;
+            }
+            set
+            {
+                this.timeOutBeetwenProccess = value;
+            }
+        }
+
+        private string BreakBarCode { get; set; }
 
         public FileService(string inDir, string outDir, string tempDir, string queueDir)
 		{
@@ -72,6 +89,8 @@ namespace FileProcessingService
 		public void WorkProcedure(CancellationToken token)
 		{
             Console.Clear();
+
+            this.CheckAndApplySettings();
 
 			var currentImageIndex = -1;
 			var imageCount = 0;
@@ -174,6 +193,8 @@ namespace FileProcessingService
                 nsManager.CreateQueue(imageQueue);
             }
 
+            this.ShareServiceSettings();
+
             watcher.EnableRaisingEvents = true;
 		}
 
@@ -194,6 +215,56 @@ namespace FileProcessingService
             document = new Document();
             section = document.AddSection();
             pdfRenderer = new PdfDocumentRenderer();
+        }
+
+        private void ShareServiceSettings()
+        {
+            var queue = QueueClient.Create(settingQueue);
+
+            var serializer = new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(ServiceSettings));
+            var settings = new ServiceSettings() { Timeout = this.TimeoutWatcher + 500, BreakBarCode = string.IsNullOrEmpty(this.BreakBarCode) ? "newCode" : this.BreakBarCode + "_!" };
+            var stream = new MemoryStream();
+            serializer.WriteObject(stream, settings);
+
+            queue.Send(new BrokeredMessage(stream.ToArray()));
+            queue.Close();
+        }
+
+        private void CheckAndApplySettings()
+        {
+            var queue = QueueClient.Create(settingQueue);
+            var message = queue.Receive(TimeSpan.FromSeconds(2));
+            if (message != null)
+            {
+                var serializedSettings = message.GetBody<byte[]>();
+                if (serializedSettings != null)
+                {
+                    byte[] bytes = serializedSettings;
+                    var serializer = new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(ServiceSettings));
+                    var stream = new MemoryStream(bytes);
+
+                    try
+                    {
+                        var settings = (ServiceSettings)serializer.ReadObject(stream);
+                        this.BreakBarCode = settings.BreakBarCode;
+                        this.TimeoutWatcher = settings.Timeout;
+
+                        Console.WriteLine($"New Settings was setup ({nameof(this.BreakBarCode)}: {this.BreakBarCode},{nameof(this.TimeoutWatcher)}: { this.TimeoutWatcher}");
+                    }
+                    catch
+                    {
+                        Console.WriteLine("Invalid settings");
+                    }
+                    finally
+                    {
+                        message.Complete();
+                    }
+                }
+
+                message.Complete();
+            }
+
+            queue.Close();
         }
 
         private void SaveDocument()
